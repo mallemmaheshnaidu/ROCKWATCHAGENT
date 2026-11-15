@@ -1,0 +1,100 @@
+# ==============================================================================
+# LiteLLM Proxy Configuration for RockWatch Multi-Agent System
+# ==============================================================================
+# Run this proxy on your laptop using:
+#   litellm --config litellm_config.yaml --port 4000
+#
+# This pools your 11 Gemini API keys to achieve:
+#   - Total Rate Limit: 165 Requests Per Minute (11 keys x 15 RPM)
+#   - Total Daily Capacity: 5,500 Requests/Day (11 keys x 500 requests/day)
+#   - Automatic Load Balancing across all 11 keys
+#   - Automatic Cooldown and Failover on HTTP 429
+# ==============================================================================
+
+model_list:
+  # Key 1
+  - model_name: gemini-3.5-flash-light
+    litellm_params:
+      model: gemini/gemini-3.5-flash-light
+      api_key: "YOUR_GEMINI_API_KEY_1"
+      rpm: 15
+
+  # Key 2
+  - model_name: gemini-3.5-flash-light
+    litellm_params:
+      model: gemini/gemini-3.5-flash-light
+      api_key: "YOUR_GEMINI_API_KEY_2"
+      rpm: 15
+
+  # Key 3
+  - model_name: gemini-3.5-flash-light
+    litellm_params:
+      model: gemini/gemini-3.5-flash-light
+      api_key: "YOUR_GEMINI_API_KEY_3"
+      rpm: 15
+
+  # Key 4
+  - model_name: gemini-3.5-flash-light
+    litellm_params:
+      model: gemini/gemini-3.5-flash-light
+      api_key: "YOUR_GEMINI_API_KEY_4"
+      rpm: 15
+
+  # Key 5
+  - model_name: gemini-3.5-flash-light
+    litellm_params:
+      model: gemini/gemini-3.5-flash-light
+      api_key: "YOUR_GEMINI_API_KEY_5"
+      rpm: 15
+
+  # Key 6
+  - model_name: gemini-3.5-flash-light
+    litellm_params:
+      model: gemini/gemini-3.5-flash-light
+      api_key: "YOUR_GEMINI_API_KEY_6"
+      rpm: 15
+
+  # Key 7
+  - model_name: gemini-3.5-flash-light
+    litellm_params:
+      model: gemini/gemini-3.5-flash-light
+      api_key: "YOUR_GEMINI_API_KEY_7"
+      rpm: 15
+
+  # Key 8
+  - model_name: gemini-3.5-flash-light
+    litellm_params:
+      model: gemini/gemini-3.5-flash-light
+      api_key: "YOUR_GEMINI_API_KEY_8"
+      rpm: 15
+
+  # Key 9
+  - model_name: gemini-3.5-flash-light
+    litellm_params:
+      model: gemini/gemini-3.5-flash-light
+      api_key: "YOUR_GEMINI_API_KEY_9"
+      rpm: 15
+
+  # Key 10
+  - model_name: gemini-3.5-flash-light
+    litellm_params:
+      model: gemini/gemini-3.5-flash-light
+      api_key: "YOUR_GEMINI_API_KEY_10"
+      rpm: 15
+
+  # Key 11
+  - model_name: gemini-3.5-flash-light
+    litellm_params:
+      model: gemini/gemini-3.5-flash-light
+      api_key: "YOUR_GEMINI_API_KEY_11"
+      rpm: 15
+
+router_settings:
+  routing_strategy: "usage-based-routing"
+  num_retries: 3
+  timeout: 10
+  allowed_fails: 2
+  cooldown_time: 60
+
+general_settings:
+  master_key: "sk-litellm-local"

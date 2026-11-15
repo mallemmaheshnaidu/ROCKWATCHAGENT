@@ -1,0 +1,269 @@
+[
+  {
+    "modality": "seismic",
+    "features": [
+      "vibration_ppv_mms",
+      "energy_joules",
+      "dominant_frequency_hz",
+      "event_duration_s",
+      "noise_ratio"
+    ],
+    "champion": {
+      "algorithm": "GradientBoostingClassifier",
+      "best_params": {
+        "ccp_alpha": 0.0,
+        "criterion": "friedman_mse",
+        "init": null,
+        "learning_rate": 0.05,
+        "loss": "log_loss",
+        "max_depth": 3,
+        "max_features": null,
+        "max_leaf_nodes": null,
+        "min_impurity_decrease": 0.0,
+        "min_samples_leaf": 1,
+        "min_samples_split": 2,
+        "min_weight_fraction_leaf": 0.0,
+        "n_estimators": 50,
+        "n_iter_no_change": null,
+        "random_state": 42,
+        "subsample": 1.0,
+        "tol": 0.0001,
+        "validation_fraction": 0.1,
+        "verbose": 0,
+        "warm_start": false
+      },
+      "accuracy": 1.0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1_score": 1.0,
+      "roc_auc": 1.0,
+      "confusion_matrix": [
+        [
+          540,
+          0
+        ],
+        [
+          0,
+          60
+        ]
+      ]
+    },
+    "runner_up": {
+      "algorithm": "RandomForestClassifier",
+      "best_params": {
+        "bootstrap": true,
+        "ccp_alpha": 0.0,
+        "class_weight": "balanced",
+        "criterion": "gini",
+        "max_depth": 5,
+        "max_features": "sqrt",
+        "max_leaf_nodes": null,
+        "max_samples": null,
+        "min_impurity_decrease": 0.0,
+        "min_samples_leaf": 1,
+        "min_samples_split": 2,
+        "min_weight_fraction_leaf": 0.0,
+        "monotonic_cst": null,
+        "n_estimators": 50,
+        "n_jobs": null,
+        "oob_score": false,
+        "random_state": 42,
+        "verbose": 0,
+        "warm_start": false
+      },
+      "accuracy": 1.0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1_score": 1.0,
+      "roc_auc": 1.0,
+      "confusion_matrix": [
+        [
+          540,
+          0
+        ],
+        [
+          0,
+          60
+        ]
+      ]
+    }
+  },
+  {
+    "modality": "displacement",
+    "features": [
+      "velocity_mm_hr",
+      "acceleration_mm_hr2",
+      "inverse_velocity",
+      "cumulative_displacement_mm",
+      "creep_rate_ratio"
+    ],
+    "champion": {
+      "algorithm": "GradientBoostingClassifier",
+      "best_params": {
+        "ccp_alpha": 0.0,
+        "criterion": "friedman_mse",
+        "init": null,
+        "learning_rate": 0.05,
+        "loss": "log_loss",
+        "max_depth": 3,
+        "max_features": null,
+        "max_leaf_nodes": null,
+        "min_impurity_decrease": 0.0,
+        "min_samples_leaf": 1,
+        "min_samples_split": 2,
+        "min_weight_fraction_leaf": 0.0,
+        "n_estimators": 50,
+        "n_iter_no_change": null,
+        "random_state": 42,
+        "subsample": 1.0,
+        "tol": 0.0001,
+        "validation_fraction": 0.1,
+        "verbose": 0,
+        "warm_start": false
+      },
+      "accuracy": 1.0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1_score": 1.0,
+      "roc_auc": 1.0,
+      "confusion_matrix": [
+        [
+          532,
+          0
+        ],
+        [
+          0,
+          68
+        ]
+      ]
+    },
+    "runner_up": {
+      "algorithm": "RandomForestClassifier",
+      "best_params": {
+        "bootstrap": true,
+        "ccp_alpha": 0.0,
+        "class_weight": "balanced",
+        "criterion": "gini",
+        "max_depth": 5,
+        "max_features": "sqrt",
+        "max_leaf_nodes": null,
+        "max_samples": null,
+        "min_impurity_decrease": 0.0,
+        "min_samples_leaf": 1,
+        "min_samples_split": 2,
+        "min_weight_fraction_leaf": 0.0,
+        "monotonic_cst": null,
+        "n_estimators": 50,
+        "n_jobs": null,
+        "oob_score": false,
+        "random_state": 42,
+        "verbose": 0,
+        "warm_start": false
+      },
+      "accuracy": 1.0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1_score": 1.0,
+      "roc_auc": 1.0,
+      "confusion_matrix": [
+        [
+          532,
+          0
+        ],
+        [
+          0,
+          68
+        ]
+      ]
+    }
+  },
+  {
+    "modality": "environmental",
+    "features": [
+      "rainfall_3h_mm",
+      "rainfall_24h_mm",
+      "pore_pressure_kpa",
+      "soil_moisture_pct",
+      "temperature_celsius"
+    ],
+    "champion": {
+      "algorithm": "GradientBoostingClassifier",
+      "best_params": {
+        "ccp_alpha": 0.0,
+        "criterion": "friedman_mse",
+        "init": null,
+        "learning_rate": 0.05,
+        "loss": "log_loss",
+        "max_depth": 3,
+        "max_features": null,
+        "max_leaf_nodes": null,
+        "min_impurity_decrease": 0.0,
+        "min_samples_leaf": 1,
+        "min_samples_split": 2,
+        "min_weight_fraction_leaf": 0.0,
+        "n_estimators": 50,
+        "n_iter_no_change": null,
+        "random_state": 42,
+        "subsample": 1.0,
+        "tol": 0.0001,
+        "validation_fraction": 0.1,
+        "verbose": 0,
+        "warm_start": false
+      },
+      "accuracy": 1.0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1_score": 1.0,
+      "roc_auc": 1.0,
+      "confusion_matrix": [
+        [
+          537,
+          0
+        ],
+        [
+          0,
+          63
+        ]
+      ]
+    },
+    "runner_up": {
+      "algorithm": "RandomForestClassifier",
+      "best_params": {
+        "bootstrap": true,
+        "ccp_alpha": 0.0,
+        "class_weight": "balanced",
+        "criterion": "gini",
+        "max_depth": 5,
+        "max_features": "sqrt",
+        "max_leaf_nodes": null,
+        "max_samples": null,
+        "min_impurity_decrease": 0.0,
+        "min_samples_leaf": 1,
+        "min_samples_split": 2,
+        "min_weight_fraction_leaf": 0.0,
+        "monotonic_cst": null,
+        "n_estimators": 50,
+        "n_jobs": null,
+        "oob_score": false,
+        "random_state": 42,
+        "verbose": 0,
+        "warm_start": false
+      },
+      "accuracy": 1.0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1_score": 1.0,
+      "roc_auc": 1.0,
+      "confusion_matrix": [
+        [
+          537,
+          0
+        ],
+        [
+          0,
+          63
+        ]
+      ]
+    }
+  }
+]

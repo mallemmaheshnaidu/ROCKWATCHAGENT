@@ -1,0 +1,133 @@
+{
+  "dataset": "UCI Machine Learning Repository #266 (Seismic Bumps)",
+  "total_instances": 2584,
+  "hazard_rate": 0.0658,
+  "champion": {
+    "algorithm": "RandomForestClassifier (Balanced)",
+    "best_params": {
+      "bootstrap": true,
+      "ccp_alpha": 0.0,
+      "class_weight": "balanced",
+      "criterion": "gini",
+      "max_depth": 5,
+      "max_features": "sqrt",
+      "max_leaf_nodes": null,
+      "max_samples": null,
+      "min_impurity_decrease": 0.0,
+      "min_samples_leaf": 1,
+      "min_samples_split": 10,
+      "min_weight_fraction_leaf": 0.0,
+      "monotonic_cst": null,
+      "n_estimators": 100,
+      "n_jobs": null,
+      "oob_score": false,
+      "random_state": 42,
+      "verbose": 0,
+      "warm_start": false
+    },
+    "best_cv_roc_auc": 0.8278,
+    "test_accuracy": 0.8549,
+    "test_precision": 0.2405,
+    "test_recall": 0.5588,
+    "test_f1": 0.3363,
+    "test_roc_auc": 0.7646,
+    "confusion_matrix": {
+      "true_negatives": 423,
+      "false_positives": 60,
+      "false_negatives": 15,
+      "true_positives": 19
+    },
+    "classification_report": {
+      "0": {
+        "precision": 0.9657534246575342,
+        "recall": 0.8757763975155279,
+        "f1-score": 0.9185667752442996,
+        "support": 483.0
+      },
+      "1": {
+        "precision": 0.24050632911392406,
+        "recall": 0.5588235294117647,
+        "f1-score": 0.336283185840708,
+        "support": 34.0
+      },
+      "accuracy": 0.8549323017408124,
+      "macro avg": {
+        "precision": 0.6031298768857292,
+        "recall": 0.7172999634636463,
+        "f1-score": 0.6274249805425038,
+        "support": 517.0
+      },
+      "weighted avg": {
+        "precision": 0.918058257832616,
+        "recall": 0.8549323017408124,
+        "f1-score": 0.8802734637554754,
+        "support": 517.0
+      }
+    }
+  },
+  "runner_up": {
+    "algorithm": "GradientBoostingClassifier",
+    "best_params": {
+      "ccp_alpha": 0.0,
+      "criterion": "friedman_mse",
+      "init": null,
+      "learning_rate": 0.03,
+      "loss": "log_loss",
+      "max_depth": 3,
+      "max_features": null,
+      "max_leaf_nodes": null,
+      "min_impurity_decrease": 0.0,
+      "min_samples_leaf": 1,
+      "min_samples_split": 2,
+      "min_weight_fraction_leaf": 0.0,
+      "n_estimators": 50,
+      "n_iter_no_change": null,
+      "random_state": 42,
+      "subsample": 1.0,
+      "tol": 0.0001,
+      "validation_fraction": 0.1,
+      "verbose": 0,
+      "warm_start": false
+    },
+    "best_cv_roc_auc": 0.9347,
+    "test_accuracy": 0.9342,
+    "test_precision": 0.0,
+    "test_recall": 0.0,
+    "test_f1": 0.0,
+    "test_roc_auc": 0.7282,
+    "confusion_matrix": {
+      "true_negatives": 483,
+      "false_positives": 0,
+      "false_negatives": 34,
+      "true_positives": 0
+    },
+    "classification_report": {
+      "0": {
+        "precision": 0.9342359767891683,
+        "recall": 1.0,
+        "f1-score": 0.966,
+        "support": 483.0
+      },
+      "1": {
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1-score": 0.0,
+        "support": 34.0
+      },
+      "accuracy": 0.9342359767891683,
+      "macro avg": {
+        "precision": 0.4671179883945841,
+        "recall": 0.5,
+        "f1-score": 0.483,
+        "support": 517.0
+      },
+      "weighted avg": {
+        "precision": 0.8727968603272114,
+        "recall": 0.9342359767891683,
+        "f1-score": 0.9024719535783365,
+        "support": 517.0
+      }
+    }
+  },
+  "cross_validation_folds": 5
+}
