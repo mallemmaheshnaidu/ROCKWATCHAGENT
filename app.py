@@ -2,10 +2,11 @@
 app.py - RockWatch: Human-Friendly 3D Open-Pit Mine Safety Copilot.
 
 Simplified, intuitive, human-centered design:
-- 100% Real Dataset Driven: All sensor data (radar velocity, pore pressure, rainfall, seismic PPV,
-  cumulative displacement, Factor of Safety) are loaded directly from the project's authentic CSV files
+- Dataset-driven simulation: sensor readings (radar velocity, pore pressure, rainfall, seismic PPV,
+  cumulative displacement, Factor of Safety) are loaded from the project's synthetic training CSVs
   (data/displacement_telemetry.csv, data/environmental_telemetry.csv, data/seismic_telemetry.csv,
-  data/slope_stability_geotech.csv). No hardcoded or random numbers!
+  data/slope_stability_geotech.csv). These are generated fixtures, NOT live mine telemetry; the UI
+  states this explicitly.
 - Transparent Gemini API Integration: Full support for real live Gemini 3.5 Flash-Lite LLM calls
   via LiteLLM proxy or direct multi-key pool. If no key is entered,
   it explicitly informs the user and runs on the local deterministic RAG rule engine.
@@ -54,7 +55,14 @@ from blackboard import (
     TARP_SAFETY_FLOOR_VELOCITY_MM_HR,
 )
 from controller import RockWatchController
-from tools.rag_tools import retrieve_sop
+from tools.arbitration_tools import EVACUATION_RADIUS_M
+from tools.auth_tools import (
+    authorization_configured,
+    mint_credential,
+    verify_passphrase,
+)
+from tools.geotech_tools import TARP_YELLOW_VELOCITY_MM_HR, evaluate_tarp
+from tools.rag_tools import get_passage_for_level
 from tools.llm_router import get_llm_router
 from tools.simulation_engine import GeotechnicalSimulationEngine
 
@@ -281,7 +289,11 @@ st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 @st.cache_data
 def load_mine_datasets():
     """
-    Loads authentic multi-sensor open-pit mining telemetry datasets from CSV files.
+    Loads the multi-sensor open-pit telemetry fixtures from CSV files.
+
+    These CSVs are synthetically generated training data (see
+    ml/generate_training_data.py and scripts/fetch_real_sih_data.py), not live
+    pit telemetry. The UI discloses this.
     """
     disp_df = pd.read_csv("data/displacement_telemetry.csv")
     env_df = pd.read_csv("data/environmental_telemetry.csv")
@@ -562,22 +574,26 @@ llm_router = get_llm_router()
 # ==============================================================================
 # SYSTEM STATE & INITIALIZATION
 # ==============================================================================
+def session_now() -> float:
+    """Single clock domain shared by the ledger, governance and forecaster."""
+    return st.session_state.get("clock_epoch", time.time()) + st.session_state.get("sim_offset_s", 0.0)
+
+
 if "bb" not in st.session_state:
-    st.session_state.bb = MineBlackboard()
-    st.session_state.ctrl = RockWatchController(st.session_state.bb)
+    st.session_state.clock_epoch = time.time()
+    st.session_state.sim_offset_s = 0.0
+
+    st.session_state.bb = MineBlackboard(time_provider=session_now)
+    st.session_state.ctrl = RockWatchController(
+        st.session_state.bb, time_provider=session_now
+    )
     st.session_state.sim_engine = GeotechnicalSimulationEngine(time_horizon_hours=24.0, step_hours=0.5)
     st.session_state.hazard_mode = "NORMAL"
     st.session_state.sim_time_hour = 12.0
-    st.session_state.user_role = "OPERATOR"
     st.session_state.selected_sector = "ZONE_NORTH_WALL"
-    st.session_state.selected_dataset_row = 0
     st.session_state.gemini_api_key = os.getenv("GEMINI_API_KEY", "")
-    st.session_state.chat_history = [
-        {
-            "role": "assistant",
-            "content": "👋 **Hello Operator!** I'm your RockWatch AI Safety Copilot. All 4 pit sectors are currently **STABLE (Level 1 Green)** based on real sensor records from `data/displacement_telemetry.csv`. Ask me anything!"
-        }
-    ]
+    # The greeting is regenerated from live state below; never stored as a claim.
+    st.session_state.chat_history = []
     st.session_state.review_ticket = {
         "id": "TKT-2026-084",
         "zone_id": "ZONE_NORTH_WALL",
@@ -594,103 +610,85 @@ ctrl: RockWatchController = st.session_state.ctrl
 
 
 # ==============================================================================
-# DATASET SELECTION: 100% PURE CSV ROWS (NO RANDOM OR HARDCODED VALUES)
+# DATASET SELECTION
 # ==============================================================================
-# Pre-identified authentic row indices from displacement_telemetry.csv & environmental_telemetry.csv
+# These CSVs are SYNTHETICALLY GENERATED training data (see
+# ml/generate_training_data.py and scripts/fetch_real_sih_data.py), not live pit
+# telemetry. The UI labels this explicitly; do not present it as a real record.
 DATASET_TIER_ROWS = {
-    "NORMAL": 0,     # Row #0: v = 0.604 mm/h, rain = 0.07 mm, pore = 38.8 kPa, FoS = 1.544
-    "MILD": 103,     # Row #103: v = 3.920 mm/h, rain = 2.71 mm, pore = 41.6 kPa, FoS = 1.129
-    "MODERATE": 9,   # Row #9: v = 6.179 mm/h, rain = 1.32 mm, pore = 24.9 kPa, FoS = 0.852
-    "SEVERE": 37,    # Row #37: v = 21.997 mm/h, rain = 1.01 mm, pore = 45.5 kPa, FoS = 0.720
+    "NORMAL": 0,     # Row #0: v = 0.604 mm/h, rain = 0.07 mm, pore = 38.8 kPa
+    "MILD": 103,     # Row #103: v = 3.920 mm/h, rain = 2.71 mm, pore = 41.6 kPa
+    "MODERATE": 9,   # Row #9: v = 6.179 mm/h, rain = 1.32 mm, pore = 24.9 kPa
+    "SEVERE": 37,    # Row #37: v = 21.997 mm/h, rain = 1.01 mm, pore = 45.5 kPa
 }
 
+if "hazard_mode" not in st.session_state:
+    st.session_state.hazard_mode = "NORMAL"
 active_mode = normalize_hazard_mode(st.session_state.get("hazard_mode", "NORMAL"))
-st.session_state.hazard_mode = active_mode
 active_row_idx = DATASET_TIER_ROWS.get(active_mode, 0)
-
-# Pull EXACT row data from the CSVs
-disp_row = disp_df.iloc[active_row_idx]
-env_row = env_df.iloc[active_row_idx]
-seis_row = seis_df.iloc[active_row_idx]
-geo_row = geo_df.iloc[active_row_idx % len(geo_df)]
-
-# Real measured physical values from dataset
-ds_vel = float(disp_row["velocity_mm_hr"])
-ds_accel = float(disp_row["acceleration_mm_hr2"])
-ds_cum_disp = float(disp_row["cumulative_displacement_mm"])
-ds_rain = float(env_row["rainfall_3h_mm"])
-ds_pore = float(env_row["pore_pressure_kpa"])
-ds_ppv = float(seis_row["vibration_ppv_mms"])
-ds_fos = float(geo_row["factor_of_safety"])
-
-# Determine TARP level strictly based on real velocity
-if ds_vel < 1.5:
-    ds_status = "GREEN"
-    ds_directive = "All mining operations authorized. Routine automated sensor scan."
-elif ds_vel < 5.0:
-    ds_status = "YELLOW"
-    ds_directive = "Heightened caution. Restrict non-essential foot traffic; alert pit supervisor."
-elif ds_vel < 15.0:
-    ds_status = "ORANGE"
-    ds_directive = "Warning status. Stand down haulage under highwall; dispatch inspection crew."
-else:
-    ds_status = "RED"
-    ds_directive = "CRITICAL EMERGENCY: Mandatory immediate pit evacuation within 500m radius!"
 
 selected_sector_key = normalize_sector_key(st.session_state.get("selected_sector", "ZONE_NORTH_WALL"))
 st.session_state.selected_sector = selected_sector_key
 
-# Compute sector states using real dataset rows
-sim_telemetries = {
-    "ZONE_NORTH_WALL": {
-        "name": "North Wall Bench 4",
-        "radar_velocity_mm_hr": ds_vel if selected_sector_key == "ZONE_NORTH_WALL" else 0.604,
-        "rainfall_3h_mm": ds_rain if selected_sector_key == "ZONE_NORTH_WALL" else 0.07,
-        "pore_pressure_kpa": ds_pore if selected_sector_key == "ZONE_NORTH_WALL" else 38.8,
-        "vibration_ppv_mms": ds_ppv if selected_sector_key == "ZONE_NORTH_WALL" else 6.27,
-        "crack_cm": (ds_cum_disp / 10.0) if selected_sector_key == "ZONE_NORTH_WALL" else 0.0,
-        "effective_level": ds_status if selected_sector_key == "ZONE_NORTH_WALL" else "GREEN",
-        "directive": ds_directive if selected_sector_key == "ZONE_NORTH_WALL" else "Routine monitoring.",
-        "dominance_override": ds_status == "RED" if selected_sector_key == "ZONE_NORTH_WALL" else False,
-        "fos": ds_fos if selected_sector_key == "ZONE_NORTH_WALL" else 1.54,
-    },
-    "ZONE_SOUTH_CREST": {
-        "name": "South Crest",
-        "radar_velocity_mm_hr": ds_vel if selected_sector_key == "ZONE_SOUTH_CREST" else 0.55,
-        "rainfall_3h_mm": ds_rain if selected_sector_key == "ZONE_SOUTH_CREST" else 0.07,
-        "pore_pressure_kpa": ds_pore if selected_sector_key == "ZONE_SOUTH_CREST" else 32.0,
-        "vibration_ppv_mms": ds_ppv if selected_sector_key == "ZONE_SOUTH_CREST" else 2.1,
-        "crack_cm": 0.0,
-        "effective_level": ds_status if selected_sector_key == "ZONE_SOUTH_CREST" else "GREEN",
-        "directive": ds_directive if selected_sector_key == "ZONE_SOUTH_CREST" else "Routine monitoring.",
-        "dominance_override": ds_status == "RED" if selected_sector_key == "ZONE_SOUTH_CREST" else False,
-        "fos": ds_fos if selected_sector_key == "ZONE_SOUTH_CREST" else 1.62,
-    },
-    "ZONE_RAMP_3": {
-        "name": "Ramp 3 Switchback",
-        "radar_velocity_mm_hr": ds_vel if selected_sector_key == "ZONE_RAMP_3" else 0.70,
-        "rainfall_3h_mm": ds_rain if selected_sector_key == "ZONE_RAMP_3" else 0.07,
-        "pore_pressure_kpa": ds_pore if selected_sector_key == "ZONE_RAMP_3" else 34.0,
-        "vibration_ppv_mms": ds_ppv if selected_sector_key == "ZONE_RAMP_3" else 3.5,
-        "crack_cm": 0.0,
-        "effective_level": ds_status if selected_sector_key == "ZONE_RAMP_3" else "GREEN",
-        "directive": ds_directive if selected_sector_key == "ZONE_RAMP_3" else "Routine monitoring.",
-        "dominance_override": ds_status == "RED" if selected_sector_key == "ZONE_RAMP_3" else False,
-        "fos": ds_fos if selected_sector_key == "ZONE_RAMP_3" else 1.58,
-    },
-    "ZONE_HAUL_ROAD": {
-        "name": "West Access Road",
-        "radar_velocity_mm_hr": ds_vel if selected_sector_key == "ZONE_HAUL_ROAD" else 0.45,
-        "rainfall_3h_mm": ds_rain if selected_sector_key == "ZONE_HAUL_ROAD" else 0.07,
-        "pore_pressure_kpa": ds_pore if selected_sector_key == "ZONE_HAUL_ROAD" else 28.0,
-        "vibration_ppv_mms": ds_ppv if selected_sector_key == "ZONE_HAUL_ROAD" else 1.8,
-        "crack_cm": 0.0,
-        "effective_level": ds_status if selected_sector_key == "ZONE_HAUL_ROAD" else "GREEN",
-        "directive": ds_directive if selected_sector_key == "ZONE_HAUL_ROAD" else "Routine monitoring.",
-        "dominance_override": ds_status == "RED" if selected_sector_key == "ZONE_HAUL_ROAD" else False,
-        "fos": ds_fos if selected_sector_key == "ZONE_HAUL_ROAD" else 1.70,
-    },
+# Every sector is seeded from a row of the same synthetic-fixture CSVs. The
+# inspected sector always uses the selected scenario row; the other sectors keep
+# a quiet baseline row. No per-sector readings are hardcoded.
+SECTOR_BASELINE_ROWS = {
+    "ZONE_NORTH_WALL": 0,
+    "ZONE_SOUTH_CREST": 12,
+    "ZONE_RAMP_3": 50,
+    "ZONE_HAUL_ROAD": 60,
 }
+
+LEVEL_DIRECTIVES = {
+    "GREEN": "Routine monitoring.",
+    "YELLOW": "Heightened caution. Restrict non-essential foot traffic; alert pit supervisor.",
+    "ORANGE": "Warning status. Stand down haulage under highwall; dispatch inspection crew.",
+    "RED": (
+        "CRITICAL EMERGENCY: Mandatory immediate pit evacuation within "
+        f"{int(EVACUATION_RADIUS_M)}m radius!"
+    ),
+}
+
+
+def sector_telemetry(zone_key: str) -> Dict[str, Any]:
+    """Derives one sector's display telemetry from CSV rows (no hardcoded readings)."""
+    row_idx = active_row_idx if zone_key == selected_sector_key else SECTOR_BASELINE_ROWS[zone_key]
+    disp = disp_df.iloc[row_idx % len(disp_df)]
+    env = env_df.iloc[row_idx % len(env_df)]
+    seis = seis_df.iloc[row_idx % len(seis_df)]
+    geo = geo_df.iloc[row_idx % len(geo_df)]
+    velocity = float(disp["velocity_mm_hr"])
+    assessment = evaluate_tarp(
+        zone_key,
+        velocity,
+        float(env["rainfall_3h_mm"]),
+        acceleration_mm_hr2=float(disp["acceleration_mm_hr2"]),
+    )
+    level = assessment["final_level"]
+    return {
+        "name": CANONICAL_SECTORS[zone_key],
+        "radar_velocity_mm_hr": velocity,
+        "acceleration_mm_hr2": float(disp["acceleration_mm_hr2"]),
+        "rainfall_3h_mm": float(env["rainfall_3h_mm"]),
+        "pore_pressure_kpa": float(env["pore_pressure_kpa"]),
+        "vibration_ppv_mms": float(seis["vibration_ppv_mms"]),
+        "crack_cm": float(disp["cumulative_displacement_mm"]) / 10.0,
+        "effective_level": level,
+        "directive": LEVEL_DIRECTIVES[level],
+        "fos": float(geo["factor_of_safety"]),
+    }
+
+
+sim_telemetries = {key: sector_telemetry(key) for key in CANONICAL_SECTORS}
+ds_directive = sim_telemetries[selected_sector_key]["directive"]
+
+# A different scenario or sector is a different telemetry regime. Drop the
+# inverse-velocity baseline so unrelated rows are never fitted as one trend.
+eval_key = (active_mode, selected_sector_key)
+if st.session_state.get("last_eval_key") != eval_key:
+    ctrl.reset_velocity_history(selected_sector_key)
+    st.session_state.last_eval_key = eval_key
 
 # Run controller cycle
 target_sec_data = sim_telemetries.get(selected_sector_key, sim_telemetries["ZONE_NORTH_WALL"])
@@ -698,7 +696,8 @@ raw_frame = {
     "radar_velocity_mm_hr": target_sec_data["radar_velocity_mm_hr"],
     "rainfall_3h_mm": target_sec_data["rainfall_3h_mm"],
     "vibration_ppv_mms": target_sec_data["vibration_ppv_mms"],
-    "timestamp": st.session_state.sim_time_hour * 3600.0,
+    "acceleration_mm_hr2": target_sec_data["acceleration_mm_hr2"],
+    "timestamp": session_now(),
 }
 cycle_res = ctrl.run_telemetry_cycle(selected_sector_key, raw_frame, context={"enable_llm": False})
 if selected_sector_key in sim_telemetries:
@@ -706,7 +705,10 @@ if selected_sector_key in sim_telemetries:
     sim_telemetries[selected_sector_key]["directive"] = cycle_res["final_alert_package"].get("advisory_directive", ds_directive)
 
 level_rank = {"GREEN": 1, "YELLOW": 2, "ORANGE": 3, "RED": 4}
-highest_global_level = max([s["effective_level"] for s in sim_telemetries.values()], key=lambda l: level_rank.get(l, 1))
+highest_global_level = max(
+    [s["effective_level"] for s in sim_telemetries.values()],
+    key=lambda level: level_rank.get(level, 4),
+)
 
 status_classes = {
     "GREEN": "status-pill-green",
@@ -714,7 +716,7 @@ status_classes = {
     "ORANGE": "status-pill-orange",
     "RED": "status-pill-red",
 }
-global_status_pill = status_classes.get(highest_global_level, "status-pill-green")
+global_status_pill = status_classes.get(highest_global_level, "status-pill-red")
 
 
 # ==============================================================================
@@ -747,7 +749,7 @@ col_mine, col_ai = st.columns([1.35, 1.0], gap="medium")
 # 1. THE 3D MINE DIGITAL TWIN (THE VISUAL ANCHOR)
 # ------------------------------------------------------------------------------
 with col_mine:
-    # Top Controls: Sector & Real Dataset Scenario Selection
+    # Top Controls: Sector & Dataset Scenario Selection
     top_c1, top_c2 = st.columns([1.1, 1.1])
     with top_c1:
         sector_options = list(CANONICAL_SECTORS.keys())
@@ -768,26 +770,26 @@ with col_mine:
 
     with top_c2:
         dataset_options = {
-            "NORMAL": f"🟢 Normal (Row #0: {disp_df.loc[0, 'velocity_mm_hr']:.2f} mm/h)",
-            "MILD": f"🟡 Caution (Row #103: {disp_df.loc[103, 'velocity_mm_hr']:.2f} mm/h)",
-            "MODERATE": f"🟠 Warning (Row #9: {disp_df.loc[9, 'velocity_mm_hr']:.2f} mm/h)",
-            "SEVERE": f"🔴 Emergency (Row #37: {disp_df.loc[37, 'velocity_mm_hr']:.2f} mm/h)",
+            "NORMAL": f"🟢 Baseline row #0 ({disp_df.loc[0, 'velocity_mm_hr']:.2f} mm/h)",
+            "MILD": f"🟡 Creep row #103 ({disp_df.loc[103, 'velocity_mm_hr']:.2f} mm/h)",
+            "MODERATE": f"🟠 Elevated row #9 ({disp_df.loc[9, 'velocity_mm_hr']:.2f} mm/h)",
+            "SEVERE": f"🔴 Precursor row #37 ({disp_df.loc[37, 'velocity_mm_hr']:.2f} mm/h)",
         }
         hazard_options = list(dataset_options.keys())
-        try:
-            default_hazard_idx = hazard_options.index(active_mode)
-        except (ValueError, IndexError):
-            default_hazard_idx = 0
 
         selected_mode = st.radio(
             "Load Dataset Hazard Scenario:",
             options=hazard_options,
-            index=default_hazard_idx,
             format_func=lambda m: dataset_options.get(m, m),
             horizontal=True,
             key="hazard_mode",
         )
         selected_mode = normalize_hazard_mode(selected_mode)
+        st.caption(
+            "Simulation dataset: synthetically generated training rows, "
+            "not live pit telemetry. Scenario labels describe the loaded row; "
+            "the alert pill shows the arbitrated TARP + model level."
+        )
 
     # Perspective Buttons
     view_angle = st.radio(
@@ -799,8 +801,8 @@ with col_mine:
     )
 
     cur_sec = sim_telemetries.get(chosen_sector, sim_telemetries["ZONE_NORTH_WALL"])
-    sec_level = cur_sec.get("effective_level", "GREEN")
-    sec_pill_class = status_classes.get(sec_level, "status-pill-green")
+    sec_level = cur_sec.get("effective_level", "RED")
+    sec_pill_class = status_classes.get(sec_level, "status-pill-red")
 
     # Generate and render the 3D model
     X_grid, Y_grid, Z_grid, s_map, R_pit = generate_clean_pit_topography(n_grid=65)
@@ -821,7 +823,24 @@ with col_mine:
     elif sec_level == "ORANGE":
         status_msg = f"🟠 <strong>Warning: Elevated Fissure Creep.</strong> Radar velocity reached {cur_sec['radar_velocity_mm_hr']:.2f} mm/h with heightened pore pressure. Stand down haulage under highwall."
     else:
-        status_msg = f"🚨 <strong>CRITICAL EMERGENCY: Massive Detachment Velocity!</strong> Radar velocity surged to {cur_sec['radar_velocity_mm_hr']:.2f} mm/h (safety floor breached). Mandatory 500m evacuation!"
+        tarp_now = bb.read("tarp_status").get(chosen_sector, {})
+        forecast_now = bb.read("forecast").get(chosen_sector, {})
+        if tarp_now.get("final_level") == "RED":
+            reason = (
+                f"deterministic TARP Red criterion "
+                f"(>= {TARP_SAFETY_FLOOR_VELOCITY_MM_HR:g} mm/h or inverse-velocity collapse)"
+            )
+        else:
+            reason = (
+                f"model forecast {forecast_now.get('risk_tier', 'HIGH')} "
+                f"({forecast_now.get('risk_probability', 0.0):.0%}) escalated under the "
+                "asymmetric-caution rule"
+            )
+        status_msg = (
+            f"🚨 <strong>CRITICAL EMERGENCY.</strong> Radar velocity "
+            f"{cur_sec['radar_velocity_mm_hr']:.2f} mm/h; {reason}. "
+            f"Mandatory {int(EVACUATION_RADIUS_M)}m evacuation!"
+        )
 
     st.markdown(f"""
     <div class="clean-card" style="margin-top: -6px;">
@@ -877,14 +896,27 @@ with col_ai:
     </div>
     """, unsafe_allow_html=True)
 
+    # 0. Live status greeting: regenerated every rerun so it can never go stale.
+    if st.session_state.chat_history and st.session_state.chat_history[0].get("ephemeral"):
+        st.session_state.chat_history.pop(0)
+    st.session_state.chat_history.insert(0, {
+        "role": "assistant",
+        "ephemeral": True,
+        "content": (
+            f"👋 **Hello Operator!** Highest pit level is **{highest_global_level}**. "
+            f"{cur_sec['name']} is at **Level {level_rank.get(sec_level, 4)} {sec_level}**. "
+            "Ask me anything about the current readings or procedures."
+        ),
+    })
+
     # 1. Process any pending un-responded user messages FIRST
     if st.session_state.chat_history and st.session_state.chat_history[-1]["role"] == "user":
         pending_user_msg = st.session_state.chat_history[-1]["content"]
-        sop_info = retrieve_sop(sec_level)
+        sop_info = get_passage_for_level(sec_level)
 
         context_str = (
             f"Sector: {cur_sec['name']}\n"
-            f"Dataset Row: #{active_row_idx} (from data/displacement_telemetry.csv & environmental_telemetry.csv)\n"
+            f"Dataset Row: #{active_row_idx} (synthetic fixture: data/displacement_telemetry.csv, data/environmental_telemetry.csv)\n"
             f"Radar Velocity: {cur_sec['radar_velocity_mm_hr']:.3f} mm/h\n"
             f"Pore Water Pressure: {cur_sec['pore_pressure_kpa']:.1f} kPa\n"
             f"Rainfall (3h): {cur_sec['rainfall_3h_mm']:.2f} mm\n"
@@ -915,7 +947,7 @@ with col_ai:
                     reply = (
                         "✅ **Yes, everything is safe and normal.**\n\n"
                         f"All sectors are at **Level 1 Green**. According to dataset record `#{active_row_idx}`, "
-                        f"radar velocity is **{cur_sec['radar_velocity_mm_hr']:.3f} mm/h** (safe threshold is < 1.5 mm/h), "
+                        f"radar velocity is **{cur_sec['radar_velocity_mm_hr']:.3f} mm/h** (signed Level 2 threshold is >= {TARP_YELLOW_VELOCITY_MM_HR:.1f} mm/h), "
                         f"pore pressure is **{cur_sec['pore_pressure_kpa']:.1f} kPa**, and rainfall is **{cur_sec['rainfall_3h_mm']:.2f} mm**. "
                         "Routine operations are authorized."
                     )
@@ -998,47 +1030,84 @@ st.markdown("---")
 with st.expander("🛡️ Geotechnical Authority & Sign-Off Console", expanded=False):
     adm_c1, adm_c2 = st.columns([1.1, 0.9], gap="large")
     with adm_c1:
-        st.markdown("**Dual-Role Geotechnical Sign-Off Console**")
-        role_select = st.selectbox(
-            "Active Session Profile:",
-            options=["OPERATOR", "GEOTECH_ENGINEER"],
-            format_func=lambda r: "👤 Control Room Operator (Monitoring Only)" if r == "OPERATOR" else "🛡️ Dr. P. Mehta, Principal Geotechnical Engineer (#GEO-7714)",
-            key="user_role",
-        )
-        is_geotech = role_select == "GEOTECH_ENGINEER"
-        perm_text = "FULL AUTHORIZATION (DESENSITIZE & PROMOTE)" if is_geotech else "RESTRICTED (CANNOT DESENSITIZE SAFETY FLOORS)"
-        perm_color = "#34d399" if is_geotech else "#f59e0b"
-        st.markdown(f"<div style='font-size: 0.78rem; font-family: monospace; color: {perm_color}; margin-bottom: 8px;'>PERMISSIONS: {perm_text}</div>", unsafe_allow_html=True)
+        st.markdown("**Geotechnical Sign-Off Console**")
 
         ticket = st.session_state.review_ticket
         st.markdown(f"""
         <div style="background: rgba(15, 23, 42, 0.6); border: 1px solid rgba(59, 130, 246, 0.2); border-radius: 8px; padding: 10px; margin-bottom: 8px; font-size: 0.82rem;">
             <strong>Ticket #{ticket['id']}</strong> | Target: {cur_sec['name']} | Status: {'APPROVED' if ticket['approved'] else 'PENDING'}<br>
             <span style="color: #94a3b8;">Requested Action: Apply temporary 0.80x multiplier for thermal drift.</span><br>
-            <span style="color: #f87171; font-family: monospace; font-size: 0.75rem;">Safety constraint: TARP Red 15.0 mm/h safety floor cannot be suppressed.</span>
+            <span style="color: #f87171; font-family: monospace; font-size: 0.75rem;">Safety constraint: TARP Red {TARP_SAFETY_FLOOR_VELOCITY_MM_HR:g} mm/h safety floor cannot be suppressed.</span>
         </div>
         """, unsafe_allow_html=True)
+
+        if not authorization_configured():
+            st.warning(
+                "Authorization backend is not configured. Set ROCKWATCH_AUTH_SECRET and "
+                "ROCKWATCH_GEOTECH_PASSPHRASE_SHA256 to enable sign-off. "
+                "Attenuation is unavailable until then (fail-closed)."
+            )
+
+        engineer_id = st.text_input(
+            "Engineer ID",
+            placeholder="e.g. GEO-7714",
+            key="engineer_id",
+        )
+        passphrase = st.text_input(
+            "Authorization Passphrase",
+            type="password",
+            key="geotech_passphrase",
+        )
+
+        active_sensitivity = bb.get_effective_forecaster_sensitivity(
+            chosen_sector, session_now()
+        )
+        st.markdown(
+            f"<div style='font-size: 0.78rem; font-family: monospace; color: #94a3b8; margin-bottom: 8px;'>"
+            f"ACTIVE FORECASTER SENSITIVITY: {active_sensitivity:.2f}x "
+            f"(baseline {FORECASTER_BASELINE_SENSITIVITY:.2f}x)</div>",
+            unsafe_allow_html=True,
+        )
 
         sub_c1, sub_c2 = st.columns(2)
         with sub_c1:
             if st.button("✍️ Authorize Decision", use_container_width=True):
-                if is_geotech:
-                    ticket["approved"] = True
-                    ticket["approved_by"] = "Dr. P. Mehta (#GEO-7714)"
-                    ctrl.submit_desensitization_request(
-                        zone_id=chosen_sector,
-                        requested_by_role="GEOTECH_ENGINEER",
-                        proposed_multiplier=0.80,
-                        duration_hours=4.0,
-                        justification="Thermal drift verified by extensometer.",
-                    )
-                    st.success("✅ APPROVED & DIGITALLY SIGNED by Principal Geotech Engineer!")
+                if not authorization_configured():
+                    st.error("❌ Access denied: no authorization backend configured.")
+                elif not verify_passphrase(passphrase):
+                    st.error("❌ Access denied: passphrase rejected.")
                 else:
-                    st.error("❌ ACCESS DENIED: Operators cannot authorize desensitization.")
+                    try:
+                        credential = mint_credential(
+                            engineer_id, "GEOTECH_ENGINEER", issued_at=session_now()
+                        )
+                        result = ctrl.submit_desensitization_proposal(
+                            zone_id=chosen_sector,
+                            operator_id="CONTROL_ROOM",
+                            reason="Thermal drift verified by extensometer.",
+                            approver_role="GEOTECH_ENGINEER",
+                            duration_hours=4.0,
+                            requested_sensitivity=0.80,
+                            approver_credential=credential,
+                        ).get("proposal_result", {})
+                    except (PermissionError, ValueError) as exc:
+                        st.error(f"❌ Approval failed: {exc}")
+                    else:
+                        if result.get("is_approved"):
+                            ticket["approved"] = True
+                            ticket["approved_by"] = result.get("approved_by")
+                            ticket["status"] = "APPROVED"
+                            st.success(
+                                f"✅ APPROVED & SIGNED by {result.get('approved_by')} "
+                                f"({result.get('proposal_id')})"
+                            )
+                        else:
+                            st.error(f"❌ Denied: {result.get('denial_reason', 'unknown reason')}")
         with sub_c2:
             if st.button("⏩ Fast-Forward +5h (Auto-Expiry)", use_container_width=True):
+                st.session_state.sim_offset_s += 5 * 3600.0
                 st.session_state.sim_time_hour = min(24.0, st.session_state.sim_time_hour + 5.0)
-                if ticket["approved"]:
+                if bb.get_effective_forecaster_sensitivity(chosen_sector, session_now()) == FORECASTER_BASELINE_SENSITIVITY:
                     ticket["approved"] = False
                     ticket["status"] = "EXPIRED"
                 st.rerun()
@@ -1046,8 +1115,11 @@ with st.expander("🛡️ Geotechnical Authority & Sign-Off Console", expanded=F
     with adm_c2:
         st.markdown("**Asymmetric Safety Policy Enforcement**")
         st.info(
-            "• **Principle of Asymmetric Safety:** Operators may elevate alert levels at any time, but only a certified "
-            "Geotechnical Engineer can authorize sensitivity attenuation.\n\n"
-            "• **Fail-Closed Auto-Expiry:** All sensitivity relaxations auto-expire back to baseline (1.00x) within 12 hours.\n\n"
-            "• **Inviolable Red Safety Floor:** TARP Level 4 Red (15.0 mm/h) velocity threshold can NEVER be suppressed by any user or model."
+            "• **Principle of Asymmetric Safety:** Operators may elevate alert levels at any time, but only a "
+            "credentialed Geotechnical Engineer can authorize sensitivity attenuation.\n\n"
+            "• **Fail-Closed Auto-Expiry:** All sensitivity relaxations auto-expire back to baseline (1.00x) within "
+            "12 hours on the shared session clock.\n\n"
+            "• **Attenuation Floor:** An approved multiplier may lower model risk by at most one severity tier.\n\n"
+            f"• **Inviolable Red Safety Floor:** TARP Level 4 Red ({TARP_SAFETY_FLOOR_VELOCITY_MM_HR:g} mm/h) velocity "
+            "threshold can NEVER be suppressed by any user or model."
         )

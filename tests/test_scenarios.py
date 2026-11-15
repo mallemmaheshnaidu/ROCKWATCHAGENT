@@ -16,7 +16,18 @@ import hashlib
 import pytest
 from blackboard import MineBlackboard, FORECASTER_BASELINE_SENSITIVITY, TARP_SAFETY_FLOOR_VELOCITY_MM_HR
 from controller import RockWatchController
+from tools.auth_tools import mint_credential
 from tools.rag_tools import retrieve_sop
+
+
+@pytest.fixture(autouse=True)
+def auth_backend(monkeypatch):
+    """Configures a deterministic authorization backend for the suite."""
+    monkeypatch.setenv("ROCKWATCH_AUTH_SECRET", "test-secret-key")
+    monkeypatch.setenv(
+        "ROCKWATCH_GEOTECH_PASSPHRASE_SHA256",
+        hashlib.sha256(b"test-passphrase").hexdigest(),
+    )
 
 
 @pytest.fixture
@@ -139,6 +150,9 @@ def test_scenario_3_false_alarm_proposal_and_gate_rejection(temp_log):
         approver_role="GEOTECH_ENGINEER",
         duration_hours=4.0,
         requested_sensitivity=0.80,
+        approver_credential=mint_credential(
+            "GEO-7714", "GEOTECH_ENGINEER", issued_at=simulated_time
+        ),
     )
     assert geo_res["proposal_result"]["is_approved"] is True
     assert bb.get_effective_forecaster_sensitivity("ZONE_C", simulated_time) == 0.80

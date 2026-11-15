@@ -10,7 +10,7 @@ Guarantees:
 from abc import ABC, abstractmethod
 from typing import Any, Dict
 from blackboard import MineBlackboard
-from sk_compat import KernelPlugin
+from sk_compat import IS_NATIVE_SK, KernelPlugin
 
 
 class BaseAgent(ABC):
@@ -23,7 +23,10 @@ class BaseAgent(ABC):
 
     def to_plugin(self) -> KernelPlugin:
         """Exports this agent's @kernel_function tools as a Semantic Kernel Plugin."""
-        return KernelPlugin.from_object(self.plugin_name, self, description=self.role)
+        if IS_NATIVE_SK:
+            # Native Semantic Kernel signature: from_object(plugin_name, plugin_instance).
+            return KernelPlugin.from_object(self.plugin_name, self)
+        return KernelPlugin.from_object(self, self.plugin_name, description=self.role)
 
     @abstractmethod
     def run(self, blackboard: MineBlackboard, context: Dict[str, Any]) -> Dict[str, Any]:

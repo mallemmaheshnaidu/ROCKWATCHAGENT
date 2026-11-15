@@ -11,7 +11,12 @@ from typing import Any, Dict, List
 from agents.base_agent import BaseAgent
 from blackboard import MineBlackboard
 from sk_compat import kernel_function
-from tools.arbitration_tools import arbitrate_decision, build_alert_package
+from tools.arbitration_tools import (
+    UnknownAlertLevel,
+    arbitrate_decision,
+    build_alert_package,
+)
+from tools.rag_tools import LEVEL_PASSAGE
 from tools.llm_router import get_llm_router
 
 
@@ -55,14 +60,29 @@ class ArbiterAgent(BaseAgent):
         sensor_health = blackboard.read("sensor_health").get(zone_id, {})
         advisor_notes = blackboard.read("advisor_notes").get(zone_id, {})
 
-        tarp_level = tarp_status.get("final_level", "GREEN")
+        tarp_level = tarp_status.get("final_level", "RED")
         forecast_tier = forecast.get("risk_tier", "LOW")
         health_status = sensor_health.get("health_status", "HEALTHY")
-        citation = advisor_notes.get("primary_citation", "[TARP-SOP-01]")
+        citation = advisor_notes.get("primary_citation") or LEVEL_PASSAGE.get(
+            str(tarp_level).upper(), "[TARP-SOP-04]"
+        )
         geofenced_assets = context.get("geofenced_assets", [])
 
         # Tool 1: Arbitrate decision (Asymmetric caution + discrepancy detection)
-        decision = self.arbitrate(tarp_level, forecast_tier, health_status)
+        try:
+            decision = self.arbitrate(tarp_level, forecast_tier, health_status)
+        except UnknownAlertLevel as exc:
+            # Fail safe: an unparseable level is escalated, never silently downgraded.
+            decision = {
+                "tarp_level": tarp_level,
+                "forecast_tier": forecast_tier,
+                "effective_alert_level": "RED",
+                "discrepancy_detected": True,
+                "review_needed": True,
+                "governing_source": "PARSE_FAILURE_FAIL_SAFE",
+                "parse_error": str(exc),
+                "rationale": f"Unparseable alert input ({exc}); escalated for human review.",
+            }
 
         # Multi-Agent LLM Call: Explain asymmetric elevation if divergence detected
         if decision.get("discrepancy_detected") and context.get("enable_llm_arbiter", False):
@@ -71,7 +91,7 @@ class ArbiterAgent(BaseAgent):
                 zone_id=zone_id,
                 tarp_level=tarp_level,
                 forecast_tier=forecast_tier,
-                effective_level=decision.get("effective_alert_level", "GREEN"),
+                effective_level=decision.get("effective_alert_level", "RED"),
                 discrepancy=decision.get("discrepancy_detected", False),
             )
             if llm_just:

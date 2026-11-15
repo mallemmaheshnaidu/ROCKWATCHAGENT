@@ -8,6 +8,8 @@ import time
 from typing import Any, Dict, Optional
 import numpy as np
 
+from ml.risk_tiers import apply_attenuation_floor, clamp_sensitivity, tier_from_probability
+
 # Lazy global instance of the trained MetaFusionEngine
 _FUSION_ENGINE = None
 
@@ -57,44 +59,63 @@ def compute_zone_risk(
             "zone_id": zone_id,
             "forecast_horizon_hours": 6,
             "risk_probability": fusion_res["risk_probability"],
+            "raw_probability": fusion_res.get("raw_probability"),
+            "raw_risk_tier": fusion_res.get("raw_risk_tier"),
             "uncertainty_interval": fusion_res["uncertainty_interval"],
             "uncertainty_margin": fusion_res["uncertainty_margin"],
             "risk_tier": fusion_res["risk_tier"],
-            "applied_sensitivity": sensitivity_multiplier,
+            "applied_sensitivity": fusion_res.get("sensitivity_applied", sensitivity_multiplier),
             "sensor_penalty": sensor_uncertainty_penalty,
             "base_probabilities": fusion_res["base_probabilities"],
+            "model_status": fusion_res.get("model_status", {}),
             "dominant_sensor": fusion_res["dominant_sensor"],
             "dominance_override": fusion_res["dominance_override"],
             "fusion_rationale": fusion_res["fusion_rationale"],
         }
 
     # Fallback heuristic calculation if ML models directory is unavailable
-    v = max(0.0, float(velocity_mm_hr))
-    rain = max(0.0, float(rainfall_3h_mm))
-    vib = max(0.0, float(vibration_ppv))
+    def _finite(value: Any, field: str) -> float:
+        if value is None:
+            # Missing channel: score it as zero evidence, not as a measurement.
+            return 0.0
+        try:
+            number = float(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{field} must be numeric, got {value!r}") from exc
+        if not np.isfinite(number) or number < 0:
+            raise ValueError(f"{field} must be finite and >= 0, got {value!r}")
+        return number
+
+    v = _finite(velocity_mm_hr, "velocity_mm_hr")
+    rain = _finite(rainfall_3h_mm, "rainfall_3h_mm")
+    vib = _finite(vibration_ppv, "vibration_ppv")
 
     v_score = min(1.0, v / 15.0)
     rain_score = min(1.0, rain / 30.0)
     vib_score = min(1.0, vib / 50.0)
 
     raw_risk = (0.60 * v_score) + (0.25 * rain_score) + (0.15 * vib_score)
-    adjusted_risk = min(1.0, raw_risk * max(0.5, sensitivity_multiplier))
+    multiplier = clamp_sensitivity(sensitivity_multiplier)
+    adjusted_risk = min(1.0, raw_risk * multiplier)
 
     uncertainty_margin = round(min(0.50, 0.08 + sensor_uncertainty_penalty), 3)
     lower_bound = round(max(0.0, adjusted_risk - uncertainty_margin), 3)
     upper_bound = round(min(1.0, adjusted_risk + uncertainty_margin), 3)
 
-    tier = "HIGH" if adjusted_risk >= 0.75 else ("MODERATE" if adjusted_risk >= 0.40 else "LOW")
+    tier = apply_attenuation_floor(raw_risk, adjusted_risk)
 
     return {
         "zone_id": zone_id,
         "forecast_horizon_hours": 6,
         "risk_probability": round(adjusted_risk, 3),
+        "raw_probability": round(raw_risk, 3),
+        "raw_risk_tier": tier_from_probability(raw_risk),
         "uncertainty_interval": [lower_bound, upper_bound],
         "uncertainty_margin": uncertainty_margin,
         "risk_tier": tier,
-        "applied_sensitivity": sensitivity_multiplier,
+        "applied_sensitivity": multiplier,
         "sensor_penalty": sensor_uncertainty_penalty,
+        "model_status": {"engine": "DETERMINISTIC_FALLBACK"},
     }
 
 

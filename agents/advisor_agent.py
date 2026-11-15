@@ -4,14 +4,14 @@ advisor_agent.py - Geotechnical Advisor & Grounded RAG Agent.
 Role:
 Retrieves authoritative geotechnical SOPs and precedent case studies via local RAG,
 cites explicit passage IDs, and formats plain-language explanations for operators.
-Powered by LLMRouter (LiteLLM proxy / 11-key Gemini pool) with automatic deterministic fallback.
+Powered by LLMRouter (LiteLLM proxy / configured Gemini key pool) with automatic deterministic fallback.
 """
 
 from typing import Any, Dict, List, Optional
 from agents.base_agent import BaseAgent
 from blackboard import MineBlackboard
 from sk_compat import kernel_function
-from tools.rag_tools import retrieve_sop, find_similar_incidents
+from tools.rag_tools import find_similar_incidents, get_passage_for_level, retrieve_sop
 from tools.llm_router import get_llm_router
 
 
@@ -44,11 +44,13 @@ class AdvisorAgent(BaseAgent):
         tarp_status = blackboard.read("tarp_status").get(zone_id, {})
         clean_telem = blackboard.read("clean_telemetry").get(zone_id, {})
 
-        tarp_level = tarp_status.get("final_level", "GREEN")
-        query = f"TARP Level {tarp_level} actions"
+        tarp_level = tarp_status.get("final_level", "RED")
 
-        # Tool 1: Grounded RAG retrieval of mandatory SOP
-        sop_doc = self.lookup_sop(query)
+        # Tool 1: Deterministic, exact citation for the active level.
+        # Keyword search remains available via lookup_sop() for free-text questions.
+        sop_doc = get_passage_for_level(tarp_level, docs_dir=self.docs_dir)
+        if not sop_doc.get("found"):
+            sop_doc = self.lookup_sop(f"TARP Level {tarp_level} mandatory actions")
 
         # Tool 2: Precedent case retrieval
         keywords = ["blast", "dust"] if context.get("is_blast_event") else ["rainfall", "detachment"]
@@ -68,7 +70,7 @@ class AdvisorAgent(BaseAgent):
         llm_synthesized = False
         model_source = "DETERMINISTIC_RULES"
 
-        # Multi-Agent LLM Call: Query LiteLLM / 11-key Gemini pool only if explicitly enabled
+        # Multi-Agent LLM Call: Query LiteLLM / configured Gemini pool only if explicitly enabled
         if context.get("enable_llm", False) and sop_doc.get("found"):
             router = get_llm_router()
             llm_res = router.generate_advisor_explanation(

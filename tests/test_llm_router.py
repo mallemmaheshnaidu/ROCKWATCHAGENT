@@ -2,7 +2,8 @@
 test_llm_router.py - Unit Tests for Multi-Key & LiteLLM Router.
 
 Verifies:
-- Parsing of 11 keys from GEMINI_API_KEYS environment variable.
+- Parsing of the comma-separated GEMINI_API_KEYS pool plus the optional
+  single-key GEMINI_API_KEY fallback.
 - Round-robin key rotation and selection.
 - Rate-limit cooldown handling (marking key in cooldown upon 429).
 - Graceful deterministic fail-safe behavior when API endpoints are unreachable.
@@ -16,20 +17,20 @@ from tools.llm_router import LLMRouter
 
 
 def test_multi_key_parsing(monkeypatch):
-    """Verifies that 11 comma-separated keys are parsed correctly into the pool."""
+    """Verifies that an 11-key pool plus the fallback key is parsed correctly."""
     test_keys = ",".join([f"key_sample_{i}" for i in range(1, 12)])
     monkeypatch.setenv("GEMINI_API_KEYS", test_keys)
     monkeypatch.setenv("GEMINI_API_KEY", "fallback_single_key")
-    monkeypatch.setenv("GEMINI_MODEL", "gemini-3.5-flash-light")
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
 
     router = LLMRouter()
     status = router.get_status()
 
-    # 11 keys + 1 fallback = 12 keys
+    # 11 pool keys + 1 fallback = 12 distinct keys
     assert status["total_keys"] == 12
     assert status["total_rpm_capacity"] == 12 * 15  # 180 RPM
     assert status["daily_capacity"] == 12 * 500      # 6,000 requests/day
-    assert status["model_name"] == "gemini-3.5-flash-light"
+    assert status["model_name"] == "gemini-3.5-flash-lite"
 
 
 def test_round_robin_rotation(monkeypatch):

@@ -11,7 +11,8 @@ Enforces:
 
 from __future__ import annotations
 import time
-from typing import Any, Callable, Dict, List, Optional
+from collections import deque
+from typing import Any, Callable, Deque, Dict, List, Optional
 
 from blackboard import MineBlackboard
 from sk_compat import Kernel
@@ -39,6 +40,13 @@ class RockWatchController:
     ):
         self.time_provider = time_provider or time.time
         self.blackboard = blackboard or MineBlackboard(time_provider=self.time_provider)
+
+        # Bounded per-zone velocity history feeds the Fukuzono inverse-velocity screen.
+        # Samples carry their epoch timestamp so the fit uses real elapsed time.
+        self.velocity_history: Dict[str, Deque[tuple]] = {}
+        self.velocity_history_maxlen = 12
+        self.velocity_min_sample_gap_s = 15 * 60.0
+        self.velocity_reset_gap_s = 12 * 3600.0
 
         # Initialize Microsoft Semantic Kernel host
         self.kernel = Kernel()
@@ -83,6 +91,34 @@ class RockWatchController:
         res_health = self.health_agent.run(self.blackboard, ctx)
         trace.append({"step": 1, "agent": self.health_agent.agent_id, "output": res_health})
 
+        # Maintain the kinematic history used by the inverse-velocity screen.
+        effective_v = (self.blackboard.read("clean_telemetry").get(zone_id) or {}).get(
+            "effective_velocity_mm_hr"
+        )
+        sample_time = float(ctx.get("timestamp", self.time_provider()))
+        if effective_v is not None:
+            history = self.velocity_history.setdefault(
+                zone_id, deque(maxlen=self.velocity_history_maxlen)
+            )
+            if not history:
+                history.append((sample_time, float(effective_v)))
+            else:
+                last_time, _ = history[-1]
+                gap = sample_time - last_time
+                if gap <= 0:
+                    # Same instant (UI rerun): replace the newest reading rather
+                    # than inventing a time step between duplicate samples.
+                    history[-1] = (sample_time, float(effective_v))
+                elif gap > self.velocity_reset_gap_s:
+                    # A long outage invalidates the trend baseline.
+                    history.clear()
+                    history.append((sample_time, float(effective_v)))
+                elif gap >= self.velocity_min_sample_gap_s:
+                    history.append((sample_time, float(effective_v)))
+                # Sub-interval samples are ignored: the trend needs real elapsed time.
+        ctx["velocity_history"] = [value for _, value in self.velocity_history.get(zone_id, [])]
+        ctx["velocity_timestamps"] = [stamp for stamp, _ in self.velocity_history.get(zone_id, [])]
+
         # 2. Perception (Surface Change & Miss Detection)
         res_perception = self.perception_agent.run(self.blackboard, ctx)
         trace.append({"step": 2, "agent": self.perception_agent.agent_id, "output": res_perception})
@@ -106,11 +142,23 @@ class RockWatchController:
         return {
             "zone_id": zone_id,
             "final_alert_package": res_arbiter.get("alert_package", {}),
-            "effective_level": res_arbiter.get("decision", {}).get("effective_alert_level", "GREEN"),
-            "discrepancy_detected": res_arbiter.get("decision", {}).get("discrepancy_detected", False),
+            "effective_level": res_arbiter.get("decision", {}).get("effective_alert_level", "RED"),
+            "discrepancy_detected": res_arbiter.get("decision", {}).get("discrepancy_detected", True),
             "trace": trace,
             "head_hash": self.blackboard.get_head_hash(),
         }
+
+    def reset_velocity_history(self, zone_id: Optional[str] = None) -> None:
+        """
+        Clears the kinematic trend baseline for a zone (or all zones).
+        Callers should use this when the telemetry source changes discontinuously
+        (for example, loading a different dataset scenario) so unrelated readings
+        are never fitted as one accelerating series.
+        """
+        if zone_id is None:
+            self.velocity_history.clear()
+        else:
+            self.velocity_history.pop(zone_id, None)
 
     def submit_desensitization_proposal(
         self,
@@ -120,6 +168,7 @@ class RockWatchController:
         approver_role: str,
         duration_hours: float = 8.0,
         requested_sensitivity: float = 0.85,
+        approver_credential: str = "",
     ) -> Dict[str, Any]:
         """Routes human proposal to Agent 7 (Governance)."""
         ctx = {
@@ -131,27 +180,10 @@ class RockWatchController:
                 "approver_role": approver_role,
                 "duration_hours": duration_hours,
                 "requested_sensitivity": requested_sensitivity,
+                "approver_credential": approver_credential,
             },
         }
         return self.governance_agent.run(self.blackboard, ctx)
-
-    def submit_desensitization_request(
-        self,
-        zone_id: str,
-        requested_by_role: str = "GEOTECH_ENGINEER",
-        proposed_multiplier: float = 0.85,
-        duration_hours: float = 8.0,
-        justification: str = "Thermal drift verified by extensometer.",
-    ) -> Dict[str, Any]:
-        """Convenience alias for submit_desensitization_proposal."""
-        return self.submit_desensitization_proposal(
-            zone_id=zone_id,
-            operator_id="GEO_P_MEHTA",
-            reason=justification,
-            approver_role=requested_by_role,
-            duration_hours=duration_hours,
-            requested_sensitivity=proposed_multiplier,
-        )
 
     def evaluate_challenger_model(
         self,

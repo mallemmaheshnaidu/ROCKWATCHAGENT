@@ -9,13 +9,15 @@ Enforces:
 """
 
 from __future__ import annotations
-import json
+
+import copy
 import hashlib
+import json
 import os
+import threading
 import time
-from typing import Any, Callable, Dict, Optional
 from dataclasses import dataclass, asdict
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 # Inviolable constants
 FORECASTER_BASELINE_SENSITIVITY: float = 1.0
@@ -82,38 +84,103 @@ class MineBlackboard:
             for k in self.partitions
         }
 
+        # Serialises appends within this process (multi-process requires a lockfile).
+        self._lock = threading.RLock()
+
         # Hash-chain state
         self.entry_index: int = 0
         self.last_hash: str = "0" * 64
+        self.chain_status: Dict[str, Any] = {"valid": True, "entries": 0, "failures": []}
         self._init_log_anchor()
 
-    def _init_log_anchor(self) -> None:
-        """Initializes or resumes the hash chain from the log file."""
-        if os.path.exists(self.log_path) and os.path.getsize(self.log_path) > 0:
-            last_line = ""
-            count = 0
-            with open(self.log_path, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if line:
-                        last_line = line
-                        count += 1
-            if last_line:
-                try:
-                    data = json.loads(last_line)
-                    self.entry_index = count
-                    self.last_hash = data.get("hash", "0" * 64)
-                    return
-                except Exception:
-                    pass
+    # --- Audit ledger ---
 
-        # Write genesis block if log is new or empty
+    @staticmethod
+    def verify_chain(log_path: str) -> Dict[str, Any]:
+        """
+        Recomputes every entry hash and link. Returns a report; never raises on
+        corrupt content (a corrupt line is reported, not fatal).
+        """
+        prev_hash = "0" * 64
+        expected_id = 1
+        failures: List[Dict[str, Any]] = []
+        count = 0
+
+        if not os.path.exists(log_path):
+            return {"valid": True, "entries": 0, "failures": [], "missing": True}
+
+        with open(log_path, "r", encoding="utf-8") as handle:
+            for lineno, raw in enumerate(handle, start=1):
+                if not raw.strip():
+                    continue
+                try:
+                    entry = json.loads(raw)
+                except json.JSONDecodeError as exc:
+                    failures.append({"line": lineno, "reason": "UNPARSEABLE", "detail": str(exc)})
+                    count += 1
+                    continue
+
+                body = {k: v for k, v in entry.items() if k != "hash"}
+                expected_hash = hashlib.sha256(
+                    json.dumps(body, sort_keys=True).encode("utf-8")
+                ).hexdigest()
+
+                if entry.get("hash") != expected_hash:
+                    failures.append({"line": lineno, "reason": "HASH_MISMATCH",
+                                     "entry_id": entry.get("entry_id")})
+                if entry.get("prev_hash") != prev_hash:
+                    failures.append({"line": lineno, "reason": "BROKEN_LINK",
+                                     "entry_id": entry.get("entry_id")})
+                if entry.get("entry_id") != expected_id:
+                    failures.append({"line": lineno, "reason": "ENTRY_ID_GAP",
+                                     "expected": expected_id, "found": entry.get("entry_id")})
+
+                prev_hash = entry.get("hash", "")
+                expected_id += 1
+                count += 1
+
+        return {"valid": not failures, "entries": count, "failures": failures}
+
+    def _rotate_corrupt_log(self, report: Dict[str, Any]) -> None:
+        """Archives a broken ledger before starting a new, verifiable segment."""
+        stamp = int(self.time_provider())
+        archive = f"{self.log_path}.corrupt-{stamp}"
+        try:
+            os.replace(self.log_path, archive)
+        except OSError:
+            # Fall back to truncation only if the file cannot be moved.
+            open(self.log_path, "w", encoding="utf-8").close()
+        self.chain_status = report
+
+    def _init_log_anchor(self) -> None:
+        """Initialises or resumes the hash chain, refusing to trust a broken ledger."""
+        if os.path.exists(self.log_path) and os.path.getsize(self.log_path) > 0:
+            report = self.verify_chain(self.log_path)
+            if report["valid"]:
+                with open(self.log_path, "r", encoding="utf-8") as handle:
+                    last_line = ""
+                    for line in handle:
+                        if line.strip():
+                            last_line = line
+                if last_line:
+                    data = json.loads(last_line)
+                    self.entry_index = report["entries"]
+                    self.last_hash = data["hash"]
+                    self.chain_status = report
+                    return
+            else:
+                self._rotate_corrupt_log(report)
+
+        # Write genesis block if log is new, empty, or was rotated after corruption
         self.entry_index = 0
         self.last_hash = "0" * 64
         self._append_log_entry(
             agent_id="SYSTEM",
             event_type="GENESIS",
-            payload={"message": "RockWatch hash-chained audit ledger initialized"},
+            payload={
+                "message": "RockWatch hash-chained audit ledger initialized",
+                "prior_chain_failures": self.chain_status.get("failures", [])[:5],
+            },
         )
 
     def _canonical_hash(self, entry_dict: Dict[str, Any]) -> str:
@@ -122,58 +189,61 @@ class MineBlackboard:
         return hashlib.sha256(canonical_str.encode("utf-8")).hexdigest()
 
     def _append_log_entry(self, agent_id: str, event_type: str, payload: Dict[str, Any]) -> str:
-        """Appends a new canonically hashed entry linked to prev_hash."""
-        self.entry_index += 1
-        now = self.time_provider()
+        """Appends a new canonically hashed entry linked to prev_hash (atomic append)."""
+        with self._lock:
+            self.entry_index += 1
+            entry = {
+                "entry_id": self.entry_index,
+                "prev_hash": self.last_hash,
+                "timestamp": self.time_provider(),
+                "agent": agent_id,
+                "event_type": event_type,
+                "payload": payload,
+            }
+            entry["hash"] = self._canonical_hash(entry)
+            self.last_hash = entry["hash"]
 
-        entry = {
-            "entry_id": self.entry_index,
-            "prev_hash": self.last_hash,
-            "timestamp": now,
-            "agent": agent_id,
-            "event_type": event_type,
-            "payload": payload,
-        }
+            line = (json.dumps(entry, sort_keys=True) + "\n").encode("utf-8")
+            fd = os.open(self.log_path, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o644)
+            try:
+                os.write(fd, line)
+                os.fsync(fd)
+            finally:
+                os.close(fd)
 
-        entry_hash = self._canonical_hash(entry)
-        entry["hash"] = entry_hash
-        self.last_hash = entry_hash
-
-        with open(self.log_path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(entry, sort_keys=True) + "\n")
-
-        return entry_hash
+            return entry["hash"]
 
     # --- Read & Write Contracts ---
 
     def read(self, section: str) -> Dict[str, Any]:
-        """Reads a partition safely."""
-        return self.partitions.get(section, {}).copy()
+        """Reads a partition safely (deep copy: callers can never mutate live state)."""
+        return copy.deepcopy(self.partitions.get(section, {}))
 
     def write(self, section: str, data: Dict[str, Any], writer_id: str) -> None:
         """
         Writes data into a partition, updates versioning metadata,
         and logs the transaction to the append-only ledger.
         """
-        if section not in self.partitions:
-            self.partitions[section] = {}
+        with self._lock:
+            if section not in self.partitions:
+                self.partitions[section] = {}
 
-        self.partitions[section].update(data)
+            self.partitions[section].update(data)
 
-        # Update partition metadata
-        meta = self.partition_meta.setdefault(
-            section, {"version": 0, "last_writer": "", "updated_at": 0.0}
-        )
-        meta["version"] += 1
-        meta["last_writer"] = writer_id
-        meta["updated_at"] = self.time_provider()
+            # Update partition metadata
+            meta = self.partition_meta.setdefault(
+                section, {"version": 0, "last_writer": "", "updated_at": 0.0}
+            )
+            meta["version"] += 1
+            meta["last_writer"] = writer_id
+            meta["updated_at"] = self.time_provider()
 
-        # Audit write
-        self._append_log_entry(
-            agent_id=writer_id,
-            event_type=f"WRITE_{section.upper()}",
-            payload={"section": section, "keys_updated": list(data.keys()), "version": meta["version"]},
-        )
+            # Audit write
+            self._append_log_entry(
+                agent_id=writer_id,
+                event_type=f"WRITE_{section.upper()}",
+                payload={"section": section, "keys_updated": list(data.keys()), "version": meta["version"]},
+            )
 
     # --- Fail-Closed Sensitivity Lookup ---
 
@@ -201,26 +271,25 @@ class MineBlackboard:
             if proposal.is_approved:
                 if now < proposal.expires_at:
                     return proposal.adjusted_sensitivity
-                else:
-                    # Proposal has expired: revert and log
-                    if not proposal.is_expired:
-                        proposal.is_expired = True
-                        self.partitions["proposals"][zone_id] = proposal.to_dict()
-                        self._append_log_entry(
-                            agent_id="SYSTEM",
-                            event_type="PROPOSAL_EXPIRED",
-                            payload={
-                                "zone_id": zone_id,
-                                "proposal_id": proposal.proposal_id,
-                                "reverted_to": FORECASTER_BASELINE_SENSITIVITY,
-                            },
-                        )
-        except Exception as e:
+                # Proposal has expired: revert and log
+                if not proposal.is_expired:
+                    proposal.is_expired = True
+                    self.partitions["proposals"][zone_id] = proposal.to_dict()
+                    self._append_log_entry(
+                        agent_id="SYSTEM",
+                        event_type="PROPOSAL_EXPIRED",
+                        payload={
+                            "zone_id": zone_id,
+                            "proposal_id": proposal.proposal_id,
+                            "reverted_to": FORECASTER_BASELINE_SENSITIVITY,
+                        },
+                    )
+        except Exception as exc:
             # Fail closed to baseline on any parsing or lookup failure
             self._append_log_entry(
                 agent_id="SYSTEM",
                 event_type="LOOKUP_ERROR_FAIL_CLOSED",
-                payload={"zone_id": zone_id, "error": str(e)},
+                payload={"zone_id": zone_id, "error": str(exc)},
             )
         return FORECASTER_BASELINE_SENSITIVITY
 

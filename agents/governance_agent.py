@@ -25,7 +25,7 @@ class GovernanceAgent(BaseAgent):
             plugin_name="GovernancePlugin",
         )
 
-    @kernel_function(name="review_proposal", description="Evaluates sensitivity proposal against geotech authorization.")
+    @kernel_function(name="review_proposal", description="Evaluates sensitivity proposal against a verified geotech credential.")
     def review_proposal(
         self,
         zone_id: str,
@@ -35,6 +35,7 @@ class GovernanceAgent(BaseAgent):
         duration_hours: float = 8.0,
         requested_sensitivity: float = 0.85,
         current_time: float = 0.0,
+        approver_credential: str = "",
     ) -> Dict[str, Any]:
         return process_desensitization_proposal(
             zone_id,
@@ -44,6 +45,7 @@ class GovernanceAgent(BaseAgent):
             duration_hours,
             requested_sensitivity,
             current_time,
+            approver_credential,
         )
 
     @kernel_function(name="diagnose_miss", description="Proposes root cause for an unalarmed detachment.")
@@ -75,6 +77,7 @@ class GovernanceAgent(BaseAgent):
                 duration_hours=prop_req.get("duration_hours", 8.0),
                 requested_sensitivity=prop_req.get("requested_sensitivity", 0.85),
                 current_time=current_time,
+                approver_credential=prop_req.get("approver_credential", ""),
             )
 
             # Store as DesensitizationProposal in blackboard
@@ -85,7 +88,7 @@ class GovernanceAgent(BaseAgent):
                 requested_by=proposal_res["operator_id"],
                 created_at=proposal_res["created_at"],
                 expires_at=proposal_res["expires_at"],
-                approved_by=prop_req.get("approver_role") if proposal_res["is_approved"] else None,
+                approved_by=proposal_res.get("approved_by") if proposal_res["is_approved"] else None,
                 is_approved=proposal_res["is_approved"],
                 adjusted_sensitivity=proposal_res["adjusted_sensitivity"],
             )

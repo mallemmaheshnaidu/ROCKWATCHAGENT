@@ -4,11 +4,11 @@ tools/llm_router.py - Enterprise LLM Router for RockWatch.
 Dual-Engine Architecture:
 1. Primary: LiteLLM Local Proxy (OpenAI-compatible /v1/chat/completions)
    - Connects to LiteLLM instance running on user's machine (e.g. http://localhost:4000/v1).
-   - Automatically pools 11 Gemini API keys (165 RPM total / 5,500 daily requests).
+   - Pools every key configured in litellm_config.yaml (the example ships with 11).
    - LiteLLM natively handles 15 RPM limits, load balancing, key cooldowns, and retries.
 2. Built-in Multi-Key Round-Robin Fallback:
-   - If LiteLLM is not running or unreachable, directly rotates through all 11 keys in
-     GEMINI_API_KEYS (or GEMINI_API_KEY) via Google Gemini REST API.
+   - If LiteLLM is not running or unreachable, directly rotates through every key in
+     GEMINI_API_KEYS plus the optional GEMINI_API_KEY fallback via the Google Gemini REST API.
    - Built-in HTTP 429 detection: marks key in 60s cooldown and immediately fails over to the next key.
 3. Fail-Closed Deterministic Safety:
    - If all APIs/network are unavailable, returns None without raising exceptions.
@@ -50,15 +50,18 @@ class LLMRouter:
     def api_model_name(self) -> str:
         """Normalizes model identifier for Google Generative Language REST API."""
         m = (self.model_name or "").lower().strip()
-        if "flash-light" in m or "flashlight" in m:
-            return "gemini-3.5-flash-lite"
-        return self.model_name
+        aliases = {
+            "gemini-3.5-flash-light": "gemini-3.5-flash-lite",
+            "gemini-3.5-flashlight": "gemini-3.5-flash-lite",
+            "gemini-3.5-flash": "gemini-3.5-flash-lite",
+        }
+        return aliases.get(m, self.model_name)
 
     def _load_config(self) -> None:
         """Loads configuration from environment variables."""
         self.litellm_base = os.getenv("LITELLM_API_BASE", "http://localhost:4000/v1").rstrip("/")
         self.litellm_key = os.getenv("LITELLM_API_KEY", "sk-litellm-local")
-        self.model_name = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-light")
+        self.model_name = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
         self.timeout_seconds = float(os.getenv("LLM_TIMEOUT_SECONDS", "6.0"))
 
         # Parse keys for direct multi-key pool
@@ -91,11 +94,24 @@ class LLMRouter:
         cooldown_keys = [k for k in self.keys if self._key_cooldowns.get(k, 0.0) > now]
 
         key_count = len(self.keys)
-        total_rpm = max(15, key_count * 15) if key_count > 0 else 15
-        daily_capacity = max(500, key_count * 500) if key_count > 0 else 500
+        # Documented free-tier planning assumption, not a guaranteed quota.
+        rpm_per_key = int(os.getenv("GEMINI_RPM_PER_KEY", "15"))
+        daily_per_key = int(os.getenv("GEMINI_DAILY_PER_KEY", "500"))
+        total_rpm = key_count * rpm_per_key
+        daily_capacity = key_count * daily_per_key
 
-        # Check if LiteLLM was recently active or try quick probe
-        mode = "LITELLM_PROXY" if self.call_stats["litellm_calls"] > 0 else ("DIRECT_POOL" if key_count > 0 else "OFFLINE")
+        # Mode reflects the most recent attempt, not an all-time success counter.
+        endpoint = self.call_stats["active_endpoint"]
+        if endpoint.startswith("LiteLLM"):
+            mode = "LITELLM_PROXY"
+        elif endpoint.startswith("Gemini Direct Pool"):
+            mode = "DIRECT_POOL"
+        elif endpoint == "OFFLINE_DETERMINISTIC_FALLBACK":
+            mode = "OFFLINE"
+        elif key_count > 0:
+            mode = "READY_DIRECT_POOL"
+        else:
+            mode = "OFFLINE"
 
         return {
             "mode": mode,
@@ -114,7 +130,7 @@ class LLMRouter:
         }
 
     def _get_next_direct_key(self) -> Optional[Tuple[str, int]]:
-        """Round-robin selection of an active (non-cooled) key from the 11-key pool."""
+        """Round-robin selection of an active (non-cooled) key from the configured pool."""
         if not self.keys:
             return None
 
@@ -127,11 +143,9 @@ class LLMRouter:
                 self._key_index = (idx + 1) % n
                 return key, idx
 
-        # If all keys are in cooldown, pick the one expiring earliest
-        earliest_key = min(self.keys, key=lambda k: self._key_cooldowns.get(k, 0.0))
-        idx = self.keys.index(earliest_key)
-        self._key_index = (idx + 1) % n
-        return earliest_key, idx
+        # Every key is cooling down: fail over to the deterministic path rather
+        # than hammering a key that is known to be rate-limited.
+        return None
 
     def _mark_key_cooldown(self, key: str, duration_sec: float = 60.0) -> None:
         """Places a key into cooldown following a 429 rate limit."""
@@ -147,7 +161,7 @@ class LLMRouter:
         max_tokens: int = 600,
     ) -> Optional[str]:
         """
-        Routes the prompt to LiteLLM first, falling back to direct 11-key Gemini pool,
+        Routes the prompt to LiteLLM first, falling back to the direct Gemini key pool,
         and finally returning None on complete outage (enabling deterministic failover).
         """
         import requests
@@ -207,14 +221,17 @@ class LLMRouter:
         # Strategy 2: Direct Multi-Key Gemini REST Pool
         # ----------------------------------------------------------------------
         if self.keys:
-            max_attempts = min(3, len(self.keys))
+            max_attempts = len(self.keys)
             for attempt in range(max_attempts):
                 key_info = self._get_next_direct_key()
                 if not key_info:
                     break
                 key, key_idx = key_info
 
-                gemini_url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.api_model_name}:generateContent?key={key}"
+                gemini_url = (
+                    "https://generativelanguage.googleapis.com/v1beta/models/"
+                    f"{self.api_model_name}:generateContent"
+                )
                 full_prompt = f"{system_prompt}\n\n{prompt}" if system_prompt else prompt
 
                 gemini_body = {
@@ -228,7 +245,11 @@ class LLMRouter:
                 try:
                     resp = requests.post(
                         gemini_url,
-                        headers={"Content-Type": "application/json"},
+                        headers={
+                            "Content-Type": "application/json",
+                            # Key travels in a header, never in the URL (avoids proxy/HAR leaks).
+                            "x-goog-api-key": key,
+                        },
                         json=gemini_body,
                         timeout=(2.5, self.timeout_seconds),
                     )
@@ -248,12 +269,27 @@ class LLMRouter:
                         # Rate limit hit: put key in cooldown and retry next key
                         self._mark_key_cooldown(key, duration_sec=60.0)
                         continue
-                    else:
-                        # Non-429 error (e.g. invalid key format or quota exhaustion)
-                        logger.warning(f"Gemini API returned HTTP {resp.status_code}: {resp.text[:120]}")
+                    elif resp.status_code in (400, 404):
+                        # Request/model error: retrying other keys cannot help.
                         self._mark_key_cooldown(key, duration_sec=300.0)
+                        logger.error(
+                            f"Gemini rejected the request (HTTP {resp.status_code}); "
+                            f"check model id {self.api_model_name!r}: {resp.text[:160]}"
+                        )
+                        break
+                    elif resp.status_code in (401, 403):
+                        # Invalid or unauthorized key: long cooldown, try the next one.
+                        self._mark_key_cooldown(key, duration_sec=3600.0)
                         continue
-                except Exception:
+                    else:
+                        # Transient server error: short jittered cooldown.
+                        self._mark_key_cooldown(key, duration_sec=5.0 + (attempt * 2.0))
+                        logger.warning(
+                            f"Gemini API returned HTTP {resp.status_code}: {resp.text[:120]}"
+                        )
+                        continue
+                except Exception as exc:
+                    logger.warning(f"Gemini direct call failed: {exc}")
                     continue
 
         # ----------------------------------------------------------------------

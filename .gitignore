@@ -36,3 +36,5 @@ data/videos/*.ogv
 data/videos/uploads/extracted_frames/
 data/videos/uploads/*
 !data/videos/uploads/.gitkeep
+logs/*.jsonl
+logs/*.corrupt-*
